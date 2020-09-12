@@ -11,65 +11,70 @@ static mut bitmap_memory: *mut Win32::VOID = std::ptr::null_mut();
 #[allow(non_upper_case_globals)]
 static mut bitmap_info: *mut Win32::BITMAPINFO = std::ptr::null_mut();
 #[allow(non_upper_case_globals)]
-static mut bitmap_device_context: Win32::HDC = std::ptr::null_mut();
+static mut bitmap_width: i32 = 0;
 #[allow(non_upper_case_globals)]
-static mut bitmap_handle: Win32::HBITMAP = std::ptr::null_mut();
+static mut bitmap_height: i32 = 0;
+#[allow(non_upper_case_globals)]
+static bytes_per_pixel: usize = std::mem::size_of::<u32>();
+
+unsafe fn render_weird_gradient(x_offset: i32, y_offset: i32) {
+    (0..bitmap_width).for_each(|x| {
+        (0..bitmap_height).for_each(|y| {
+            let index = (x + bitmap_width * y) as usize;
+            let pixel = bitmap_memory.cast::<i32>().add(index);
+            let green = x + x_offset;
+            let blue = y + y_offset;
+            pixel.write((green << 8) | blue);
+        })
+    })
+}
 
 unsafe fn resize_dib_section(width: i32, height: i32) {
-    if !bitmap_handle.is_null() {
-        Win32::DeleteObject(bitmap_handle.cast());
+    if !bitmap_memory.is_null() {
+        Win32::VirtualFree(bitmap_memory, 0, Win32::MEM_RELEASE);
     }
-    if bitmap_device_context.is_null() {
-        bitmap_device_context =
-            Win32::CreateCompatibleDC(std::ptr::null_mut());
-    }
+
+    bitmap_height = height;
+    bitmap_width = width;
+
     bitmap_info =
         Box::into_raw(Box::new(std::mem::zeroed::<Win32::BITMAPINFO>()));
     (*bitmap_info).bmiHeader.biSize =
         std::mem::size_of::<Win32::BITMAPINFOHEADER>() as u32;
     (*bitmap_info).bmiHeader.biWidth = width;
-    (*bitmap_info).bmiHeader.biHeight = height;
+    (*bitmap_info).bmiHeader.biHeight = -height;
     (*bitmap_info).bmiHeader.biPlanes = 1;
     (*bitmap_info).bmiHeader.biBitCount = 32;
     (*bitmap_info).bmiHeader.biCompression = Win32::BI_RGB;
-    bitmap_handle = Win32::CreateDIBSection(
-        bitmap_device_context,
-        bitmap_info,
-        Win32::DIB_RGB_COLORS,
-        &mut bitmap_memory,
+
+
+    let bitmap_size = bytes_per_pixel * (width * height) as usize;
+    bitmap_memory = Win32::VirtualAlloc(
         std::ptr::null_mut(),
-        0,
+        bitmap_size,
+        Win32::MEM_COMMIT,
+        Win32::PAGE_READWRITE,
     );
-    dbg!((*bitmap_info).bmiHeader.biBitCount);
-    dbg!(bitmap_handle);
-    dbg!(bitmap_memory);
-    dbg!(std::io::Error::last_os_error());
-    (0..(width * height)).for_each(|index| {
-        bitmap_memory
-            .cast::<u32>()
-            .add(index as usize)
-            .write(0x00_00_00_00);
-    });
 }
 
 fn update_window(
     device_context: Win32::HDC,
     x: i32,
     y: i32,
-    width: i32,
-    height: i32,
+    _width: i32,
+    _height: i32,
 ) {
     unsafe {
         Win32::StretchDIBits(
             device_context,
             x,
             y,
-            width,
-            height,
+            bitmap_width,
+            bitmap_height,
             x,
             y,
-            width,
-            height,
+            bitmap_width,
+            bitmap_height,
             bitmap_memory,
             bitmap_info,
             Win32::DIB_RGB_COLORS,
@@ -155,17 +160,28 @@ fn main() {
         };
 
         if !window.is_null() {
+            let mut x_offset = 0;
+            let mut y_offset = 0;
             unsafe {
                 while running {
                     let mut msg: Win32::MSG = std::mem::zeroed();
-                    let message_result =
-                        Win32::GetMessageW(&mut msg, window, 0, 0);
-                    if message_result > 0 {
+                    while Win32::PeekMessageW(
+                        &mut msg,
+                        window,
+                        0,
+                        0,
+                        Win32::PM_REMOVE,
+                    ) > 0
+                    {
                         Win32::TranslateMessage(&msg);
                         Win32::DispatchMessageW(&msg);
-                    } else {
-                        running = false;
                     }
+                    render_weird_gradient(x_offset, y_offset);
+                    let device_context = Win32::GetDC(window);
+                    update_window(device_context, 0, 0, 0, 0);
+                    Win32::ReleaseDC(window, device_context);
+                    x_offset += 1;
+                    y_offset += 2;
                 }
             }
         } else {
