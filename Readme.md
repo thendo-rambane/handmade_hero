@@ -89,19 +89,13 @@ Animation is done in the main running loop with a `y_offset` and `x_offset`,
 changing colours depending on those variables.
 
 
+## Day 5 (Graphics Review)
+Encapsulate window state in `struct OffScreenBuffer` this holds the memory
+`BITMABITMAPINFO`, width, height, and `bytes_per_pixel`.
 
 
-
-
-
-
-
-
-
-
-
-
-
+The `update_window` and `resize_dib_section` methods are now implemented for this
+`OffScreenBuffer`.
 
 
 
