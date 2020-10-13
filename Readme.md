@@ -27,6 +27,7 @@ A base template the system uses to create [windows](https://docs.microsoft.com/e
   - Style(`DWORD`): We use `CS_HREDRAW | CS_VREDRAW` to make window redraw on resize
   
   - `lpfnWinProc`: (`fn* WindowProc`): Function pointer to function of signature:
+
     ```rust
     extern "system" fn fn_name(
             _:Win32::HWND,
@@ -171,3 +172,60 @@ The `update_window` and `resize_dib_section` methods are now implemented for thi
    | Win32::WM_KEYUP
    | Win32::WM_KEYDOWN` and get the keycodes from `w_param` then match those
     codes and use each arm to define actions per key press
+
+## Day 7 (Create the direct Sound buffer)
+
+This process requires the dsound(direct sound) library to be dynamically loaded
+in order to prevent crashes if the library does not exist.
+
+- A Type of function pointer whose signature is the same as the dsound
+    function needed from dsound is defined in this case the types are
+
+    ```rust
+    type DirectSoundCreate = fn(
+        Win32::LPCGUID,
+        *mut Win32::LPDIRECTSOUND,
+        Win32::LPUNKNOWN,
+    ) -> Win32::HRESULT;
+    ```
+
+- Initially assign these thunks to variables that will later contain the true
+    funtion pointers
+- Use `Win32:::LoadLibrary()` to get the dsound functions from the dll
+- If `Win32::LoadLibrary()` does not return null
+  - Use `Win32::GetProcAddress()` get the respective funtions the functions
+    are of type `Win32::FARPROC` they need to be cast to their respective types
+    defined earlier `ptr::cast()` does not work so `mem::transmute()` was used
+    instead
+    `//NOTE:This is extremely unsafe (Type restricrions are not being
+    considered only size)`
+
+### Initialise direct sound
+
+   ```rust
+    let mut direct_sound: Win32::LPDIRECTSOUND = unsafe {
+        Box::into_raw(Box::new(core::mem::zeroed::<Win32::IDirectSound>()))
+   ```
+
+- `direct_sound` is a pointer to an `IDirectSound` object.
+
+- This is required by the defined function of signature `DirectSoundCreate`,
+  that will then mutate the object turning it into a pointer to the
+  direct_sound object we will use as a handle to create and manage the sound buffers
+
+- `create_direct_sound` is a function of type `DirectSoundCreate` that is called
+   on the direct_sound pointer to initialize it after the initialization
+   `SetCooperativeLevel` is called on a dereferenced `direct_sound`
+
+- Create a `WAVEFORMATEX` object to store and define the format to use in the
+  primary buffer setup
+
+- Create a `DSBUFFERDESC` to store the description of a primary sound buffer.
+
+- Create an `IDirectSoundBuffer` pointer and pass the pointer as and argument to
+  a `CreateSoundBuffer` call with the description
+
+- Call `SetFormat` on the buffer passing an instance of `WAVEFORMATEX`
+
+- Create another `DSBUFFERDESC` object and another SoundBuffer this is the
+  buffer the audio will be written to
