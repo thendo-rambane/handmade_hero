@@ -1,3 +1,4 @@
+//use std::convert::TryInto;
 #[cfg(windows)]
 mod windows;
 
@@ -33,7 +34,11 @@ lazy_static! {
         |_, _| Win32::ERROR_DEVICE_NOT_CONNECTED;
 }
 
-fn init_sound(window: Win32::HWND, samples_per_sec: u32, buffer_size: i32) {
+fn init_sound(
+    window: Win32::HWND,
+    samples_per_sec: u32,
+    buffer_size: u32,
+) -> Result<Win32::LPDIRECTSOUNDBUFFER, std::io::Error> {
     let direct_sound_lib =
         unsafe { Win32::LoadLibraryA(Win32::c_str_a("dsound.dll").as_ptr()) };
     if !direct_sound_lib.is_null() {
@@ -99,32 +104,34 @@ fn init_sound(window: Win32::HWND, samples_per_sec: u32, buffer_size: i32) {
             }
         }
 
-        {
-            let mut buffer_desc = Win32::DSBUFFERDESC::default();
-            buffer_desc.dwSize =
-                core::mem::size_of::<Win32::DSBUFFERDESC>() as u32;
-            buffer_desc.dwFlags = 0;
-            buffer_desc.dwBufferBytes = buffer_size as u32;
-            buffer_desc.lpwfxFormat = &mut wave_format;
+        let mut buffer_desc = Win32::DSBUFFERDESC::default();
+        buffer_desc.dwSize =
+            core::mem::size_of::<Win32::DSBUFFERDESC>() as u32;
+        buffer_desc.dwFlags = 0;
+        buffer_desc.dwBufferBytes = buffer_size as u32;
+        buffer_desc.lpwfxFormat = &mut wave_format;
+        let mut global_sound_buffer = unsafe {
+            Box::into_raw(Box::new(core::mem::zeroed::<
+                Win32::IDirectSoundBuffer,
+            >()))
+        };
+        if Win32::SUCCEEDED(unsafe {
+            (*direct_sound).CreateSoundBuffer(
+                &buffer_desc,
+                &mut global_sound_buffer,
+                core::ptr::null_mut(),
+            )
+        }) {
+            dbg!("Secondary buffer created\n");
 
-            let mut secondary_buffer = Box::into_raw(Box::new(unsafe {
-                core::mem::zeroed::<Win32::IDirectSoundBuffer>()
-            }));
-
-            if Win32::SUCCEEDED(unsafe {
-                (*direct_sound).CreateSoundBuffer(
-                    &buffer_desc,
-                    &mut secondary_buffer,
-                    core::ptr::null_mut(),
-                )
-            }) {
-                dbg!("Secondary buffer created\n");
-            } else {
-                // TODO: logging
-            }
+            Ok(global_sound_buffer)
+        } else {
+            Err(std::io::Error::last_os_error())
+            // TODO: logging
         }
     } else {
         // TODO: logging
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -191,7 +198,7 @@ impl ControllerManager {
 }
 
 struct OffScreenBuffer {
-    memory: *mut Win32::VOID,
+    memory: *mut Win32::c_void,
     info: Win32::BITMAPINFO,
     width: i32,
     height: i32,
@@ -208,6 +215,50 @@ impl OffScreenBuffer {
             bytes_per_pixel: core::mem::size_of::<u32>(),
         }
     }
+    fn create_window(
+        &self,
+        window_class_name: &str,
+        window_name: &str,
+    ) -> Result<Win32::HWND, std::io::Error> {
+        let window_class_name = Win32::c_str_a(window_class_name);
+        let window_name = Win32::c_str_a(window_name);
+        let window_instance =
+            unsafe { Win32::GetModuleHandleA(core::ptr::null()) };
+        let mut window_class = Win32::WNDCLASSA::default();
+
+        window_class.style = Win32::CS_VREDRAW | Win32::CS_HREDRAW;
+        window_class.lpfnWndProc = Some(main_window_callback);
+        window_class.hInstance = window_instance;
+        window_class.lpszClassName = window_class_name.as_ptr();
+        if unsafe { Win32::RegisterClassA(&window_class) } != 0 {
+            let window = unsafe {
+                Win32::CreateWindowExA(
+                    0,
+                    window_class_name.as_ptr(),
+                    window_name.as_ptr(),
+                    Win32::WS_OVERLAPPEDWINDOW | Win32::WS_VISIBLE,
+                    Win32::CW_USEDEFAULT,
+                    Win32::CW_USEDEFAULT,
+                    Win32::CW_USEDEFAULT,
+                    Win32::CW_USEDEFAULT,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                    window_instance,
+                    core::ptr::null_mut(),
+                )
+            };
+            if !window.is_null() {
+                Ok(window)
+            } else {
+                dbg!("window is null");
+                Err(std::io::Error::last_os_error())
+            }
+        } else {
+            dbg!("Class not registered");
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
     fn update_window(
         &self,
         device_context: Win32::HDC,
@@ -251,7 +302,7 @@ impl OffScreenBuffer {
 
         let size = self.bytes_per_pixel * (self.width * self.height) as usize;
         self.memory = Win32::VirtualAlloc(
-            core::ptr::null_mut(),
+            core::ptr::null_mut::<Win32::c_void>(),
             size,
             Win32::MEM_COMMIT | Win32::MEM_RESERVE,
             Win32::PAGE_READWRITE,
@@ -264,15 +315,18 @@ unsafe fn render_weird_gradient(
     x_offset: i32,
     y_offset: i32,
 ) {
+    let pixel = buffer.memory.cast::<u32>();
     (0..buffer.width).for_each(|x| {
         (0..buffer.height).for_each(|y| {
             let index = (x + buffer.width * y) as usize;
-            let pixel = buffer.memory.cast::<u32>().add(index);
-            let green = (x + x_offset) as u32;
-            let blue = (y + y_offset) as u32;
-            pixel.write((green << 8) | blue);
+            let red = pixel.add(index).cast::<u8>().add(2);
+            let green = pixel.add(index).cast::<u8>().add(1);
+            let blue = pixel.add(index).cast::<u8>().add(0);
+            blue.write((x + x_offset) as u8);
+            green.write((y + y_offset) as u8);
+            red.write(0);
         })
-    })
+    });
 }
 unsafe extern "system" fn main_window_callback(
     window: Win32::HWND,
@@ -362,50 +416,34 @@ fn main() {
         controller_manager.as_mut().unwrap()
     };
     local_controller_manager.load_x_input("xinput1_4.dll");
-
-    let instance = unsafe { Win32::GetModuleHandleA(core::ptr::null()) };
-    let window_class_name = Win32::c_str_a("HandmadeHeroWindowClass");
-    let window_name = Win32::c_str_a("Handmade Hero");
     let buffer = unsafe {
         global_buffer = Box::into_raw(Box::new(OffScreenBuffer::new()));
         global_buffer.as_mut().unwrap()
     };
 
-    let mut window_class: Win32::WNDCLASSA = Win32::WNDCLASSA::default();
-
-    window_class.style = Win32::CS_VREDRAW | Win32::CS_HREDRAW;
-    window_class.lpfnWndProc = Some(main_window_callback);
-    window_class.hInstance = instance;
-    window_class.lpszClassName = window_class_name.as_ptr();
-
-    if unsafe { Win32::RegisterClassA(&window_class) } != 0 {
-        let window = unsafe {
-            Win32::CreateWindowExA(
-                0,
-                window_class_name.as_ptr(),
-                window_name.as_ptr(),
-                Win32::WS_OVERLAPPEDWINDOW | Win32::WS_VISIBLE,
-                Win32::CW_USEDEFAULT,
-                Win32::CW_USEDEFAULT,
-                Win32::CW_USEDEFAULT,
-                Win32::CW_USEDEFAULT,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-                instance,
-                core::ptr::null_mut(),
-            )
-        };
-
+    let window_result =
+        buffer.create_window("HandmadeHeroWindowClass", "Handmade Hero");
+    if let Ok(window) = window_result {
         if !window.is_null() {
-            init_sound(
-                window,
-                48000,
-                48000 * (core::mem::size_of::<u16>()) as i32 * 2,
-            );
+            dbg!("After init sound");
             unsafe {
+                let samples_per_sec: u32 = 48000;
+                let bytes_per_sample: u32 =
+                    (core::mem::size_of::<u16>()) as u32 * 2;
+                let sound_buffer_size = samples_per_sec * bytes_per_sample;
+                let tone: u32 = 256;
+                let tone_volume: i16 = 3000;
+                let wave_period: u32 = samples_per_sec.div_euclid(tone);
+                let half_wave_period = wave_period / 2;
+                let sound_buffer =
+                    &*(init_sound(window, samples_per_sec, sound_buffer_size)
+                        .unwrap());
+                sound_buffer.Play(0, 0, Win32::DSBPLAY_LOOPING);
+
                 buffer.resize_dib_section(1280, 720);
+                let mut running_sample_index = 0;
+                let mut msg: Win32::MSG = core::mem::zeroed();
                 while running {
-                    let mut msg: Win32::MSG = core::mem::zeroed();
                     while Win32::PeekMessageA(
                         &mut msg,
                         window,
@@ -418,12 +456,91 @@ fn main() {
                         Win32::DispatchMessageA(&msg);
                     }
                     render_weird_gradient(buffer, X_OFFSET, Y_OFFSET);
+                    let mut play_cursor: u32 = 0;
+                    let mut write_cursor: u32 = 0;
+                    if Win32::SUCCEEDED(sound_buffer.GetCurrentPosition(
+                        &mut play_cursor,
+                        &mut write_cursor,
+                    )) {
+                        let lock_offset = running_sample_index
+                            * bytes_per_sample
+                            % sound_buffer_size;
+                        let mut region1: Win32::LPVOID = core::ptr::null_mut();
+                        let mut region1_size = 0u32;
+                        let mut region2: Win32::LPVOID = core::ptr::null_mut();
+                        let mut region2_size = 0u32;
+
+                        let bytes_to_lock = match lock_offset == play_cursor {
+                            false if lock_offset > play_cursor => {
+                                sound_buffer_size - lock_offset + play_cursor
+                            }
+                            true => sound_buffer_size,
+                            _ => play_cursor - lock_offset,
+                        };
+
+                        if Win32::SUCCEEDED(sound_buffer.Lock(
+                            lock_offset,
+                            bytes_to_lock,
+                            &mut region1,
+                            &mut region1_size,
+                            &mut region2,
+                            &mut region2_size,
+                            0,
+                        )) {
+                            let mut sample_out: *mut i16 = region1.cast();
+                            for _ in 0..region1_size
+                                .div_euclid(bytes_per_sample)
+                                as usize
+                            {
+                                let value = if running_sample_index
+                                    .div_euclid(half_wave_period)
+                                    .rem_euclid(2)
+                                    != 0
+                                {
+                                    tone_volume
+                                } else {
+                                    -tone_volume
+                                };
+                                sample_out.write(value);
+                                sample_out = sample_out.add(1);
+                                sample_out.write(value);
+                                sample_out = sample_out.add(1);
+                                running_sample_index += 1;
+                            }
+
+                            let mut sample_out: *mut i16 = region2.cast();
+                            for _ in 0..region2_size
+                                .div_euclid(bytes_per_sample)
+                                as usize
+                            {
+                                let value = if running_sample_index
+                                    .div_euclid(half_wave_period)
+                                    .rem_euclid(2)
+                                    != 0
+                                {
+                                    tone_volume
+                                } else {
+                                    -tone_volume
+                                };
+                                sample_out.write(value);
+                                sample_out = sample_out.add(1);
+                                sample_out.write(value);
+                                sample_out = sample_out.add(1);
+                                running_sample_index += 1;
+                            }
+
+                            sound_buffer.Unlock(
+                                region1,
+                                region1_size,
+                                region2,
+                                region2_size,
+                            );
+                        }
+                    }
                     for i in 0..Win32::XUSER_MAX_COUNT {
-                        let state =
-                            Box::into_raw(Box::new(core::mem::zeroed::<
-                                Win32::XINPUT_STATE,
-                            >(
-                            )));
+                        let state = Box::into_raw(Box::new(
+                            Win32::XINPUT_STATE::default(),
+                        ));
 
                         {
                             let state_result = local_controller_manager
@@ -494,14 +611,13 @@ fn main() {
                         window_dimensions.height,
                     );
                     Win32::ReleaseDC(window, device_context);
-                    X_OFFSET += 1;
-                    Y_OFFSET += 2;
                 }
             }
         } else {
             dbg!("WINDOW_IS_NULL"); //TODO:{Thendo} LOGGING
         }
     } else {
-        dbg!("FAILED TO REGISTER CLASS"); //TODO:{Thendo} LOGGING
+        dbg!("COULD NOT CREATE WINDOW"); //TODO:{Thendo} LOGGING
+        dbg!(std::io::Error::last_os_error());
     }
 }

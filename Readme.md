@@ -229,3 +229,19 @@ in order to prevent crashes if the library does not exist.
 
 - Create another `DSBUFFERDESC` object and another SoundBuffer this is the
   buffer the audio will be written to
+
+## Day 8 Write a Square wave to the buffer
+
+After initialising direct sound next we have to write to the secondary buffer we
+defined, we do this by:
+
+- Using the `GetCurrentPosition` function on the buffer, passing a mutable
+  play_cursor and write_cursor which will store the position of those cursors.
+  
+- Work out the lock offset and bytes_to_lock then lock the buffer using the
+  `Lock` method on the buffer pass 2 pointers to the cycle buffer lock region
+  and each buffers length  
+- write to the region pointers
+- Use `Play` to play what in the buffer
+-Unlock the buffer with `Unlock` method
+
