@@ -41,16 +41,15 @@ lazy_static! {
 }
 
 struct SoundOutput {
+    play_cursor: u32,
+    write_cursor: u32,
     samples_per_second: u32,
     running_sample_index: u32,
     buffer_size: u32,
     bytes_per_sample: u32,
     time: f32,
-    //freq: u32,
     volume: i16,
     wave_period: u32,
-    //half_wave_period: u32,
-    //latency_sample_count: u32,
     buffer: Win32::LPDIRECTSOUNDBUFFER,
 }
 
@@ -74,20 +73,17 @@ impl SoundOutput {
     ) -> Self {
         let buffer_size = samples_per_second * bytes_per_sample;
         let wave_period = samples_per_second.div_euclid(freq);
-        //let half_wave_period = wave_period / 2;
-        //let latency_sample_count = samples_per_second / 20;
         Self {
             time: 0.0,
             samples_per_second,
             buffer_size,
-            //latency_sample_count,
             bytes_per_sample,
-            //freq,
             volume,
             wave_period,
-            //half_wave_period,
             running_sample_index: 0,
             buffer: core::ptr::null_mut(),
+            play_cursor: 0,
+            write_cursor: 0,
         }
     }
     fn init_sound(
@@ -197,33 +193,27 @@ impl SoundOutput {
         }
     }
     fn fill_sound_buffer(&mut self) {
-        let mut play_cursor: u32 = 0;
-        let mut write_cursor: u32 = 0;
-        let buffer = unsafe { &*self.buffer };
+        let buffer = unsafe { self.buffer.as_mut().unwrap() };
         if Win32::SUCCEEDED(unsafe {
-            buffer.GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+            buffer.GetCurrentPosition(
+                &mut self.play_cursor,
+                &mut self.write_cursor,
+            )
         }) {
-            let lock_offset = (self.running_sample_index
-                * self.bytes_per_sample)
-                .rem_euclid(self.buffer_size);
-
-            //let target_cursor = (play_cursor
-            //+ self.latency_sample_count * self.bytes_per_sample)
-            //.rem_euclid(self.buffer_size);
-
-            let bytes_to_lock: u32 = match lock_offset == play_cursor {
-                true => self.buffer_size,
-                false if lock_offset > play_cursor => {
-                    self.buffer_size - lock_offset + play_cursor
-                }
-                _ => play_cursor - lock_offset,
-            };
-
             let mut region1: Win32::LPVOID = core::ptr::null_mut();
             let mut region1_size = 0u32;
             let mut region2: Win32::LPVOID = core::ptr::null_mut();
             let mut region2_size = 0u32;
 
+            let lock_offset = (self.running_sample_index
+                * self.bytes_per_sample)
+                .rem_euclid(self.buffer_size);
+
+            //TODO: need a more accurate check for play_cursor
+            let bytes_to_lock: u32 = match lock_offset > self.play_cursor {
+                true => self.buffer_size - lock_offset + self.play_cursor,
+                _ => self.play_cursor - lock_offset,
+            };
             if Win32::SUCCEEDED(unsafe {
                 buffer.Lock(
                     lock_offset,
@@ -236,40 +226,36 @@ impl SoundOutput {
                 )
             }) {
                 let mut sample_out: *mut i16 = region1.cast();
-                (0..region1_size.div_euclid(self.bytes_per_sample)).for_each(
-                    |_| {
-                        let value =
-                            (self.time.sin() * self.volume as f32) as i16;
-                        unsafe {
-                            sample_out.write(value);
-                            sample_out = sample_out.add(1);
-                            sample_out.write(value);
-                            sample_out = sample_out.add(1);
-                        }
-                        self.running_sample_index += 1;
-                        self.time += 2.0
-                            * std::f32::consts::PI
-                            * (1.0 / self.wave_period as f32);
-                    },
-                );
+                for _ in 0..region1_size.div_euclid(self.bytes_per_sample) {
+                    let value = (self.time.sin() * self.volume as f32) as i16;
+                    unsafe {
+                        sample_out.write(value);
+                        sample_out = sample_out.add(1);
+                        sample_out.write(value);
+                        sample_out = sample_out.add(1);
+                    }
+                    self.running_sample_index += 1;
+                    self.time = 2.0
+                        * std::f32::consts::PI
+                        * (self.running_sample_index as f32
+                            / self.wave_period as f32);
+                }
 
-                let mut sample_out: *mut i16 = region2.cast();
-                (0..region2_size.div_euclid(self.bytes_per_sample)).for_each(
-                    |_| {
-                        let value =
-                            (self.time.sin() * self.volume as f32) as i16;
-                        unsafe {
-                            sample_out.write(value);
-                            sample_out = sample_out.add(1);
-                            sample_out.write(value);
-                            sample_out = sample_out.add(1);
-                        }
-                        self.running_sample_index += 1;
-                        self.time += 2.0
-                            * std::f32::consts::PI
-                            * (1.0 / self.wave_period as f32);
-                    },
-                );
+                sample_out = region2.cast();
+                for _ in 0..region2_size.div_euclid(self.bytes_per_sample) {
+                    let value = (self.time.sin() * self.volume as f32) as i16;
+                    unsafe {
+                        sample_out.write(value);
+                        sample_out = sample_out.add(1);
+                        sample_out.write(value);
+                        sample_out = sample_out.add(1);
+                    }
+                    self.running_sample_index += 1;
+                    self.time = 2.0
+                        * std::f32::consts::PI
+                        * (self.running_sample_index as f32
+                            / self.wave_period as f32);
+                }
 
                 unsafe {
                     buffer.Unlock(
@@ -557,6 +543,7 @@ unsafe extern "system" fn main_window_callback(
 }
 
 fn main() {
+    // Get get initial counter
     let mut counter_per_second = Win32::LARGE_INTEGER::default();
     unsafe {
         Win32::QueryPerformanceCounter(&mut counter_per_second);
@@ -582,10 +569,14 @@ fn main() {
             unsafe {
                 let mut sound_output = SoundOutput::default();
                 let sound_buffer = &*sound_output.init_sound(window).unwrap();
+                sound_output.fill_sound_buffer();
+                //sound_buffer.Play(0, 0, Win32::DSBPLAY_LOOPING);
 
                 buffer.resize_dib_section(1280, 720);
+                // counter buffer.
                 let last_counter = Win32::LARGE_INTEGER::default();
                 let last_cycle_counter: u64 = _rdtsc();
+
                 let mut msg: Win32::MSG = core::mem::zeroed();
                 while running {
                     while Win32::PeekMessageA(
@@ -607,6 +598,8 @@ fn main() {
                     }
                     sound_output.fill_sound_buffer();
                     sound_buffer.Play(0, 0, Win32::DSBPLAY_LOOPING);
+
+                    // Get input state
                     for i in 0..Win32::XUSER_MAX_COUNT {
                         let state = Box::into_raw(Box::new(
                             Win32::XINPUT_STATE::default(),
@@ -681,6 +674,8 @@ fn main() {
                         window_dimensions.height,
                     );
                     Win32::ReleaseDC(window, device_context);
+
+                    // Calculate performance counter
                     let current_cycle_counter = _rdtsc();
                     let mut current_counter = Win32::LARGE_INTEGER::default();
                     Win32::QueryPerformanceCounter(&mut current_counter);
