@@ -5,6 +5,12 @@ mod windows;
 #[cfg(windows)]
 use windows as Win32;
 
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::_rdtsc;
+
+#[cfg(target_arch = "x86")]
+use core::arch::x86::_rdtsc;
+
 static mut Y_OFFSET: i32 = 0;
 static mut X_OFFSET: i32 = 0;
 
@@ -551,6 +557,10 @@ unsafe extern "system" fn main_window_callback(
 }
 
 fn main() {
+    let mut counter_per_second = Win32::LARGE_INTEGER::default();
+    unsafe {
+        Win32::QueryPerformanceCounter(&mut counter_per_second);
+    }
     let local_controller_manager = unsafe {
         controller_manager = Box::into_raw(Box::new(ControllerManager::new(
             *GET_X_INPUT_THUNK,
@@ -574,6 +584,8 @@ fn main() {
                 let sound_buffer = &*sound_output.init_sound(window).unwrap();
 
                 buffer.resize_dib_section(1280, 720);
+                let last_counter = Win32::LARGE_INTEGER::default();
+                let last_cycle_counter: u64 = _rdtsc();
                 let mut msg: Win32::MSG = core::mem::zeroed();
                 while running {
                     while Win32::PeekMessageA(
@@ -669,6 +681,23 @@ fn main() {
                         window_dimensions.height,
                     );
                     Win32::ReleaseDC(window, device_context);
+                    let current_cycle_counter = _rdtsc();
+                    let mut current_counter = Win32::LARGE_INTEGER::default();
+                    Win32::QueryPerformanceCounter(&mut current_counter);
+                    let counter_elapsed =
+                        current_counter.QuadPart() - last_counter.QuadPart();
+                    let cycle_elapsed =
+                        current_cycle_counter - last_cycle_counter;
+                    let mili_sec_per_frame = 1000.0f32
+                        * counter_elapsed as f32
+                        / *counter_per_second.QuadPart() as f32;
+                    let frames_per_sec = *counter_per_second.QuadPart() as f32
+                        / counter_elapsed as f32;
+                    let mcpf = cycle_elapsed as f32 / (1000f32 * 1000f32);
+                    println!(
+                        "ms/f:{:.2},\t fps:{:.2},\t mc/f:{:.2},\t",
+                        mili_sec_per_frame, frames_per_sec, mcpf
+                    );
                 }
             }
         } else {

@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = [ "winnt","memoryapi","windef","libloaderapi","winuser","impl-default", "winerror","impl-debug", "xinput", "dsound", "guiddef", "minwindef", "mmreg", "wingdi", "unknwnbase"] }
+winapi = { version = "0.3", features = [ "winnt","memoryapi","windef","libloaderapi","winuser","impl-default", "winerror","impl-debug", "xinput", "dsound", "guiddef", "minwindef","profileapi", "mmreg", "wingdi", "unknwnbase", "ntdef"] }
 
 [dependencies]
 lazy_static = "*" 
