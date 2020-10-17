@@ -34,104 +34,247 @@ lazy_static! {
         |_, _| Win32::ERROR_DEVICE_NOT_CONNECTED;
 }
 
-fn init_sound(
-    window: Win32::HWND,
-    samples_per_sec: u32,
+struct SoundOutput {
+    samples_per_second: u32,
+    running_sample_index: u32,
     buffer_size: u32,
-) -> Result<Win32::LPDIRECTSOUNDBUFFER, std::io::Error> {
-    let direct_sound_lib =
-        unsafe { Win32::LoadLibraryA(Win32::c_str_a("dsound.dll").as_ptr()) };
-    if !direct_sound_lib.is_null() {
-        let create_direct_sound: DirectSoundCreate = unsafe {
-            let function = Win32::GetProcAddress(
-                direct_sound_lib,
-                Win32::c_str_a("DirectSoundCreate").as_ptr(),
-            );
-            //TODO: Find an alternetive to mem::transmute it is extremely
-            //unsafe
-            core::mem::transmute::<SomeFunction, DirectSoundCreate>(function)
-        };
-        let mut direct_sound: Win32::LPDIRECTSOUND = unsafe {
-            Box::into_raw(Box::new(core::mem::zeroed::<Win32::IDirectSound>()))
-        };
-        if Win32::SUCCEEDED(create_direct_sound(
-            core::ptr::null(),
-            &mut direct_sound,
-            core::ptr::null_mut(),
-        )) && Win32::SUCCEEDED(unsafe {
-            (*direct_sound).SetCooperativeLevel(window, Win32::DSSCL_PRIORITY)
-        }) {
-            dbg!("DirectSoundCreate OK");
-            dbg!("SetCooperativeLevel OK");
-        } else {
-            // TODO: logging
-        }
-        let mut wave_format = Win32::WAVEFORMATEX::default();
-        wave_format.wFormatTag = Win32::WAVE_FORMAT_PCM;
-        wave_format.nChannels = 2;
-        wave_format.nSamplesPerSec = samples_per_sec;
-        wave_format.wBitsPerSample = 16;
-        wave_format.nBlockAlign =
-            wave_format.nChannels * wave_format.wBitsPerSample / 8;
-        wave_format.nAvgBytesPerSec =
-            wave_format.nSamplesPerSec * wave_format.nBlockAlign as u32;
+    bytes_per_sample: u32,
+    time: f32,
+    //freq: u32,
+    volume: i16,
+    wave_period: u32,
+    //half_wave_period: u32,
+    //latency_sample_count: u32,
+    buffer: Win32::LPDIRECTSOUNDBUFFER,
+}
 
-        {
+impl Default for SoundOutput {
+    fn default() -> Self {
+        SoundOutput::new(
+            48000,
+            (core::mem::size_of::<u16>() * 2) as u32,
+            251,
+            1500,
+        )
+    }
+}
+
+impl SoundOutput {
+    fn new(
+        samples_per_second: u32,
+        bytes_per_sample: u32,
+        freq: u32,
+        volume: i16,
+    ) -> Self {
+        let buffer_size = samples_per_second * bytes_per_sample;
+        let wave_period = samples_per_second.div_euclid(freq);
+        //let half_wave_period = wave_period / 2;
+        //let latency_sample_count = samples_per_second / 20;
+        Self {
+            time: 0.0,
+            samples_per_second,
+            buffer_size,
+            //latency_sample_count,
+            bytes_per_sample,
+            //freq,
+            volume,
+            wave_period,
+            //half_wave_period,
+            running_sample_index: 0,
+            buffer: core::ptr::null_mut(),
+        }
+    }
+    fn init_sound(
+        &mut self,
+        window: Win32::HWND,
+    ) -> Result<Win32::LPDIRECTSOUNDBUFFER, std::io::Error> {
+        let direct_sound_lib = unsafe {
+            Win32::LoadLibraryA(Win32::c_str_a("dsound.dll").as_ptr())
+        };
+        if !direct_sound_lib.is_null() {
+            let create_direct_sound: DirectSoundCreate = unsafe {
+                let function = Win32::GetProcAddress(
+                    direct_sound_lib,
+                    Win32::c_str_a("DirectSoundCreate").as_ptr(),
+                );
+                //TODO: Find an alternetive to mem::transmute it is extremely
+                //unsafe
+                core::mem::transmute::<SomeFunction, DirectSoundCreate>(
+                    function,
+                )
+            };
+            let mut direct_sound: Win32::LPDIRECTSOUND = unsafe {
+                Box::into_raw(Box::new(
+                    core::mem::zeroed::<Win32::IDirectSound>(),
+                ))
+            };
+            if Win32::SUCCEEDED(create_direct_sound(
+                core::ptr::null(),
+                &mut direct_sound,
+                core::ptr::null_mut(),
+            )) && Win32::SUCCEEDED(unsafe {
+                (*direct_sound)
+                    .SetCooperativeLevel(window, Win32::DSSCL_PRIORITY)
+            }) {
+                dbg!("DirectSoundCreate OK");
+                dbg!("SetCooperativeLevel OK");
+            } else {
+                // TODO: logging
+            }
+
+            let mut wave_format = Win32::WAVEFORMATEX::default();
+            wave_format.wFormatTag = Win32::WAVE_FORMAT_PCM;
+            wave_format.nChannels = 2;
+            wave_format.nSamplesPerSec = self.samples_per_second;
+            wave_format.wBitsPerSample = 16;
+            wave_format.nBlockAlign =
+                wave_format.nChannels * wave_format.wBitsPerSample / 8;
+            wave_format.nAvgBytesPerSec =
+                wave_format.nSamplesPerSec * wave_format.nBlockAlign as u32;
+
+            {
+                let mut buffer_desc = Win32::DSBUFFERDESC::default();
+                buffer_desc.dwSize =
+                    core::mem::size_of::<Win32::DSBUFFERDESC>() as u32;
+                buffer_desc.dwFlags = Win32::DSBCAPS_PRIMARYBUFFER;
+
+                let mut primary_buffer = Box::into_raw(Box::new(unsafe {
+                    core::mem::zeroed::<Win32::IDirectSoundBuffer>()
+                }));
+
+                if Win32::SUCCEEDED(unsafe {
+                    (*direct_sound).CreateSoundBuffer(
+                        &buffer_desc,
+                        &mut primary_buffer,
+                        core::ptr::null_mut(),
+                    )
+                }) {
+                    dbg!("Create primary buffer ok\n");
+                    if Win32::SUCCEEDED(unsafe {
+                        (*primary_buffer).SetFormat(&wave_format)
+                    }) {
+                        dbg!("Primary buffer set format ok\n");
+                    } else {
+                        // TDOO: logging
+                    }
+                }
+            }
+
             let mut buffer_desc = Win32::DSBUFFERDESC::default();
             buffer_desc.dwSize =
                 core::mem::size_of::<Win32::DSBUFFERDESC>() as u32;
-            buffer_desc.dwFlags = Win32::DSBCAPS_PRIMARYBUFFER;
-
-            let mut primary_buffer = Box::into_raw(Box::new(unsafe {
-                core::mem::zeroed::<Win32::IDirectSoundBuffer>()
-            }));
-
+            buffer_desc.dwFlags = 0;
+            buffer_desc.dwBufferBytes = self.buffer_size as u32;
+            buffer_desc.lpwfxFormat = &mut wave_format;
+            self.buffer = unsafe {
+                Box::into_raw(Box::new(core::mem::zeroed::<
+                    Win32::IDirectSoundBuffer,
+                >()))
+            };
             if Win32::SUCCEEDED(unsafe {
                 (*direct_sound).CreateSoundBuffer(
                     &buffer_desc,
-                    &mut primary_buffer,
+                    &mut self.buffer,
                     core::ptr::null_mut(),
                 )
             }) {
-                dbg!("Create primary buffer ok\n");
-                if Win32::SUCCEEDED(unsafe {
-                    (*primary_buffer).SetFormat(&wave_format)
-                }) {
-                    dbg!("Primary buffer set format ok\n");
-                } else {
-                    // TDOO: logging
+                dbg!("Secondary buffer created\n");
+
+                Ok(self.buffer)
+            } else {
+                Err(std::io::Error::last_os_error())
+                // TODO: logging
+            }
+        } else {
+            // TODO: logging
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    fn fill_sound_buffer(&mut self) {
+        let mut play_cursor: u32 = 0;
+        let mut write_cursor: u32 = 0;
+        let buffer = unsafe { &*self.buffer };
+        if Win32::SUCCEEDED(unsafe {
+            buffer.GetCurrentPosition(&mut play_cursor, &mut write_cursor)
+        }) {
+            let lock_offset = (self.running_sample_index
+                * self.bytes_per_sample)
+                .rem_euclid(self.buffer_size);
+
+            //let target_cursor = (play_cursor
+            //+ self.latency_sample_count * self.bytes_per_sample)
+            //.rem_euclid(self.buffer_size);
+
+            let bytes_to_lock: u32 = match lock_offset == play_cursor {
+                true => self.buffer_size,
+                false if lock_offset > play_cursor => {
+                    self.buffer_size - lock_offset + play_cursor
+                }
+                _ => play_cursor - lock_offset,
+            };
+
+            let mut region1: Win32::LPVOID = core::ptr::null_mut();
+            let mut region1_size = 0u32;
+            let mut region2: Win32::LPVOID = core::ptr::null_mut();
+            let mut region2_size = 0u32;
+
+            if Win32::SUCCEEDED(unsafe {
+                buffer.Lock(
+                    lock_offset,
+                    bytes_to_lock,
+                    &mut region1,
+                    &mut region1_size,
+                    &mut region2,
+                    &mut region2_size,
+                    0,
+                )
+            }) {
+                let mut sample_out: *mut i16 = region1.cast();
+                (0..region1_size.div_euclid(self.bytes_per_sample)).for_each(
+                    |_| {
+                        let value =
+                            (self.time.sin() * self.volume as f32) as i16;
+                        unsafe {
+                            sample_out.write(value);
+                            sample_out = sample_out.add(1);
+                            sample_out.write(value);
+                            sample_out = sample_out.add(1);
+                        }
+                        self.running_sample_index += 1;
+                        self.time += 2.0
+                            * std::f32::consts::PI
+                            * (1.0 / self.wave_period as f32);
+                    },
+                );
+
+                let mut sample_out: *mut i16 = region2.cast();
+                (0..region2_size.div_euclid(self.bytes_per_sample)).for_each(
+                    |_| {
+                        let value =
+                            (self.time.sin() * self.volume as f32) as i16;
+                        unsafe {
+                            sample_out.write(value);
+                            sample_out = sample_out.add(1);
+                            sample_out.write(value);
+                            sample_out = sample_out.add(1);
+                        }
+                        self.running_sample_index += 1;
+                        self.time += 2.0
+                            * std::f32::consts::PI
+                            * (1.0 / self.wave_period as f32);
+                    },
+                );
+
+                unsafe {
+                    buffer.Unlock(
+                        region1,
+                        region1_size,
+                        region2,
+                        region2_size,
+                    );
                 }
             }
         }
-
-        let mut buffer_desc = Win32::DSBUFFERDESC::default();
-        buffer_desc.dwSize =
-            core::mem::size_of::<Win32::DSBUFFERDESC>() as u32;
-        buffer_desc.dwFlags = 0;
-        buffer_desc.dwBufferBytes = buffer_size as u32;
-        buffer_desc.lpwfxFormat = &mut wave_format;
-        let mut global_sound_buffer = unsafe {
-            Box::into_raw(Box::new(core::mem::zeroed::<
-                Win32::IDirectSoundBuffer,
-            >()))
-        };
-        if Win32::SUCCEEDED(unsafe {
-            (*direct_sound).CreateSoundBuffer(
-                &buffer_desc,
-                &mut global_sound_buffer,
-                core::ptr::null_mut(),
-            )
-        }) {
-            dbg!("Secondary buffer created\n");
-
-            Ok(global_sound_buffer)
-        } else {
-            Err(std::io::Error::last_os_error())
-            // TODO: logging
-        }
-    } else {
-        // TODO: logging
-        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -427,21 +570,10 @@ fn main() {
         if !window.is_null() {
             dbg!("After init sound");
             unsafe {
-                let samples_per_sec: u32 = 48000;
-                let bytes_per_sample: u32 =
-                    (core::mem::size_of::<u16>()) as u32 * 2;
-                let sound_buffer_size = samples_per_sec * bytes_per_sample;
-                let tone: u32 = 256;
-                let tone_volume: i16 = 3000;
-                let wave_period: u32 = samples_per_sec.div_euclid(tone);
-                let half_wave_period = wave_period / 2;
-                let sound_buffer =
-                    &*(init_sound(window, samples_per_sec, sound_buffer_size)
-                        .unwrap());
-                sound_buffer.Play(0, 0, Win32::DSBPLAY_LOOPING);
+                let mut sound_output = SoundOutput::default();
+                let sound_buffer = &*sound_output.init_sound(window).unwrap();
 
                 buffer.resize_dib_section(1280, 720);
-                let mut running_sample_index = 0;
                 let mut msg: Win32::MSG = core::mem::zeroed();
                 while running {
                     while Win32::PeekMessageA(
@@ -456,87 +588,13 @@ fn main() {
                         Win32::DispatchMessageA(&msg);
                     }
                     render_weird_gradient(buffer, X_OFFSET, Y_OFFSET);
-                    let mut play_cursor: u32 = 0;
-                    let mut write_cursor: u32 = 0;
-                    if Win32::SUCCEEDED(sound_buffer.GetCurrentPosition(
-                        &mut play_cursor,
-                        &mut write_cursor,
-                    )) {
-                        let lock_offset = running_sample_index
-                            * bytes_per_sample
-                            % sound_buffer_size;
-                        let mut region1: Win32::LPVOID = core::ptr::null_mut();
-                        let mut region1_size = 0u32;
-                        let mut region2: Win32::LPVOID = core::ptr::null_mut();
-                        let mut region2_size = 0u32;
-
-                        let bytes_to_lock = match lock_offset == play_cursor {
-                            false if lock_offset > play_cursor => {
-                                sound_buffer_size - lock_offset + play_cursor
-                            }
-                            true => sound_buffer_size,
-                            _ => play_cursor - lock_offset,
-                        };
-
-                        if Win32::SUCCEEDED(sound_buffer.Lock(
-                            lock_offset,
-                            bytes_to_lock,
-                            &mut region1,
-                            &mut region1_size,
-                            &mut region2,
-                            &mut region2_size,
-                            0,
-                        )) {
-                            let mut sample_out: *mut i16 = region1.cast();
-                            for _ in 0..region1_size
-                                .div_euclid(bytes_per_sample)
-                                as usize
-                            {
-                                let value = if running_sample_index
-                                    .div_euclid(half_wave_period)
-                                    .rem_euclid(2)
-                                    != 0
-                                {
-                                    tone_volume
-                                } else {
-                                    -tone_volume
-                                };
-                                sample_out.write(value);
-                                sample_out = sample_out.add(1);
-                                sample_out.write(value);
-                                sample_out = sample_out.add(1);
-                                running_sample_index += 1;
-                            }
-
-                            let mut sample_out: *mut i16 = region2.cast();
-                            for _ in 0..region2_size
-                                .div_euclid(bytes_per_sample)
-                                as usize
-                            {
-                                let value = if running_sample_index
-                                    .div_euclid(half_wave_period)
-                                    .rem_euclid(2)
-                                    != 0
-                                {
-                                    tone_volume
-                                } else {
-                                    -tone_volume
-                                };
-                                sample_out.write(value);
-                                sample_out = sample_out.add(1);
-                                sample_out.write(value);
-                                sample_out = sample_out.add(1);
-                                running_sample_index += 1;
-                            }
-
-                            sound_buffer.Unlock(
-                                region1,
-                                region1_size,
-                                region2,
-                                region2_size,
-                            );
-                        }
+                    if Y_OFFSET <= 1000 && Y_OFFSET >= -1000 {
+                        let tmp = (Y_OFFSET / 1000) * 256 + 512;
+                        sound_output.wave_period =
+                            sound_output.samples_per_second / tmp as u32;
                     }
+                    sound_output.fill_sound_buffer();
+                    sound_buffer.Play(0, 0, Win32::DSBPLAY_LOOPING);
                     for i in 0..Win32::XUSER_MAX_COUNT {
                         let state = Box::into_raw(Box::new(
                             Win32::XINPUT_STATE::default(),
