@@ -24,9 +24,35 @@ impl GameScreenBuffer {
 }
 
 pub struct GameAudioBuffer {
-    pub samples: *mut c_void,
+    pub samples: *mut i16,
+    pub sample_count: u32,
     pub buffer_size: u32,
-    bytes_per_sample: u32,
+    pub bytes_per_sample: u32,
+    pub tone_volume: i16,
+    pub wave_period: u32,
+    pub time: f32,
+    pub count: u32,
+}
+
+impl GameAudioBuffer {
+    pub fn new(
+        buffer_size: u32,
+        bytes_per_sample: u32,
+        tone_volume: i16,
+        samples_per_second: u32,
+        freq: u32,
+    ) -> Self {
+        Self {
+            samples: core::ptr::null_mut(),
+            buffer_size,
+            sample_count: 0,
+            bytes_per_sample,
+            tone_volume,
+            wave_period: samples_per_second / freq,
+            time: 0.0,
+            count: 0,
+        }
+    }
 }
 
 fn render_weird_gradient(
@@ -49,10 +75,31 @@ fn render_weird_gradient(
         }
     }
 }
+
+pub fn fill_audio_buffer(audio_buffer: &mut GameAudioBuffer) {
+    let mut sample_out = audio_buffer.samples;
+    let mut time = 0f32;
+    for _ in 0..audio_buffer.sample_count {
+        let value = (time.sin() * audio_buffer.tone_volume as f32) as i16;
+        unsafe {
+            sample_out.write(value);
+            sample_out = sample_out.add(1);
+            sample_out.write(value);
+            sample_out = sample_out.add(1);
+        }
+        time = 2.0
+            * std::f32::consts::PI
+            * (audio_buffer.count as f32 / audio_buffer.wave_period as f32);
+        audio_buffer.count += 1;
+    }
+}
+
 pub fn game_update_and_render(
-    buffer: &mut GameScreenBuffer,
+    video_buffer: &mut GameScreenBuffer,
+    audio_buffer: &mut GameAudioBuffer,
     x_offset: i32,
     y_offset: i32,
 ) {
-    render_weird_gradient(buffer, x_offset, y_offset);
+    render_weird_gradient(video_buffer, x_offset, y_offset);
+    fill_audio_buffer(audio_buffer);
 }

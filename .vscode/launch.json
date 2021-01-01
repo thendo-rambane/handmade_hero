@@ -26,15 +26,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'win32_handmade'",
+            "name": "Debug executable 'handmade_hero'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=win32_handmade",
+                    "--bin=handmade_hero",
                     "--package=handmade_hero"
                 ],
                 "filter": {
-                    "name": "win32_handmade",
+                    "name": "handmade_hero",
                     "kind": "bin"
                 }
             },
@@ -44,16 +44,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'win32_handmade'",
+            "name": "Debug unit tests in executable 'handmade_hero'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=win32_handmade",
+                    "--bin=handmade_hero",
                     "--package=handmade_hero"
                 ],
                 "filter": {
-                    "name": "win32_handmade",
+                    "name": "handmade_hero",
                     "kind": "bin"
                 }
             },

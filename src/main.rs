@@ -39,10 +39,21 @@ fn get_window_dimensions(window: win32::HWND) -> WindowDimentions {
 impl From<&mut OffScreenBuffer> for handmade_hero::GameScreenBuffer {
     fn from(screen_buffer: &mut OffScreenBuffer) -> Self {
         handmade_hero::GameScreenBuffer::new(
-            screen_buffer.memory,
+            screen_buffer.memory.cast(),
             screen_buffer.bytes_per_pixel,
             screen_buffer.height,
             screen_buffer.width,
+        )
+    }
+}
+impl From<&mut SoundOutput> for handmade_hero::GameAudioBuffer {
+    fn from(sound_output: &mut SoundOutput) -> Self {
+        handmade_hero::GameAudioBuffer::new(
+            sound_output.buffer_size,
+            sound_output.bytes_per_sample,
+            sound_output.volume,
+            sound_output.samples_per_second,
+            sound_output.freq,
         )
     }
 }
@@ -149,15 +160,24 @@ fn main() {
             unsafe {
                 let mut sound_output = SoundOutput::default();
                 let sound_buffer = &*sound_output.init_sound(window).unwrap();
-                sound_output.fill_sound_buffer();
-
+                let sound_memory = win32::VirtualAlloc(
+                    core::ptr::null_mut(),
+                    sound_output.buffer_size as usize,
+                    win32::MEM_COMMIT | win32::MEM_RESERVE,
+                    win32::PAGE_READWRITE,
+                );
+                if sound_memory.is_null() {
+                    panic!("Could Not Allocate Sound buffer");
+                }
                 buffer.resize_dib_section(1280, 720);
                 // counter buffer
                 let mut last_cycle_counter: u64 = _rdtsc();
                 let mut last_counter = win32::LARGE_INTEGER::default();
                 win32::QueryPerformanceCounter(&mut last_counter);
+                sound_output.clear_sound_buffer();
+                sound_buffer.Play(0, 0, win32::DSBPLAY_LOOPING);
 
-                let mut msg: win32::MSG = core::mem::zeroed();
+                let mut msg: win32::MSG = win32::MSG::default();
                 while running {
                     while win32::PeekMessageA(
                         &mut msg,
@@ -170,8 +190,41 @@ fn main() {
                         win32::TranslateMessage(&msg);
                         win32::DispatchMessageA(&msg);
                     }
+
+                    let mut lock_offset = 0u32;
+                    let mut bytes_to_lock = 0u32;
+                    let mut sound_ready = false;
+                    if win32::SUCCEEDED(sound_buffer.GetCurrentPosition(
+                        &mut sound_output.play_cursor,
+                        &mut sound_output.write_cursor,
+                    )) {
+                        let taget_cursor = sound_output.play_cursor;
+                        //(sound_output.play_cursor
+                        //+ sound_output.latency_sample_count
+                        //* sound_output.bytes_per_sample)
+                        //.rem_euclid(sound_output.buffer_size);
+                        lock_offset = (sound_output.running_sample_index
+                            * sound_output.bytes_per_sample)
+                            .rem_euclid(sound_output.buffer_size);
+
+                        //TODO: need a more accurate check for play_cursor
+                        bytes_to_lock = match lock_offset > taget_cursor {
+                            true => {
+                                sound_output.buffer_size - lock_offset
+                                    + taget_cursor
+                            }
+                            false => taget_cursor - lock_offset,
+                        };
+                        sound_ready = true;
+                    }
+                    let mut game_audio: handmade_hero::GameAudioBuffer =
+                        (&mut sound_output).into();
+                    game_audio.samples = sound_memory.cast();
+                    game_audio.sample_count =
+                        bytes_to_lock / sound_output.bytes_per_sample;
                     handmade_hero::game_update_and_render(
                         &mut buffer.into(),
+                        &mut game_audio,
                         X_OFFSET,
                         Y_OFFSET,
                     );
@@ -180,8 +233,6 @@ fn main() {
                         sound_output.wave_period =
                             sound_output.samples_per_second / tmp as u32;
                     }
-                    sound_output.fill_sound_buffer();
-                    sound_buffer.Play(0, 0, win32::DSBPLAY_LOOPING);
 
                     // Get input state
                     for i in 0..win32::XUSER_MAX_COUNT {
@@ -254,6 +305,14 @@ fn main() {
                             }
                         }
                     }
+                    if sound_ready {
+                        sound_output.fill_sound_buffer(
+                            &game_audio,
+                            lock_offset,
+                            bytes_to_lock,
+                        );
+                    }
+                    sound_buffer.Play(0, 0, win32::DSBPLAY_LOOPING);
                     let device_context = win32::GetDC(window);
                     let window_dimensions = get_window_dimensions(window);
                     buffer.update_window(

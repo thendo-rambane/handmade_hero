@@ -10,6 +10,7 @@ type SomeFunction = win32::FARPROC;
 
 pub struct SoundOutput {
     pub play_cursor: u32,
+    pub latency_sample_count: u32,
     pub write_cursor: u32,
     pub samples_per_second: u32,
     pub running_sample_index: u32,
@@ -19,6 +20,7 @@ pub struct SoundOutput {
     pub volume: i16,
     pub wave_period: u32,
     pub buffer: win32::LPDIRECTSOUNDBUFFER,
+    pub freq: u32,
 }
 
 impl Default for SoundOutput {
@@ -41,8 +43,10 @@ impl SoundOutput {
     ) -> Self {
         let buffer_size = samples_per_second * bytes_per_sample;
         let wave_period = samples_per_second.div_euclid(freq);
+        let latency_sample_count = samples_per_second / 20;
         Self {
             time: 0.0,
+            latency_sample_count,
             samples_per_second,
             buffer_size,
             bytes_per_sample,
@@ -52,6 +56,7 @@ impl SoundOutput {
             buffer: core::ptr::null_mut(),
             play_cursor: 0,
             write_cursor: 0,
+            freq,
         }
     }
     pub fn init_sound(
@@ -160,80 +165,101 @@ impl SoundOutput {
             Err(std::io::Error::last_os_error())
         }
     }
-    pub fn fill_sound_buffer(&mut self) {
+    pub fn clear_sound_buffer(&mut self) {
         let buffer = unsafe { self.buffer.as_mut().unwrap() };
+        let mut region1: win32::LPVOID = core::ptr::null_mut();
+        let mut region1_size = 0u32;
+        let mut region2: win32::LPVOID = core::ptr::null_mut();
+        let mut region2_size = 0u32;
+
         if win32::SUCCEEDED(unsafe {
-            buffer.GetCurrentPosition(
-                &mut self.play_cursor,
-                &mut self.write_cursor,
+            buffer.Lock(
+                0,
+                self.buffer_size,
+                &mut region1,
+                &mut region1_size,
+                &mut region2,
+                &mut region2_size,
+                0,
             )
         }) {
-            let mut region1: win32::LPVOID = core::ptr::null_mut();
-            let mut region1_size = 0u32;
-            let mut region2: win32::LPVOID = core::ptr::null_mut();
-            let mut region2_size = 0u32;
-
-            let lock_offset = (self.running_sample_index
-                * self.bytes_per_sample)
-                .rem_euclid(self.buffer_size);
-
-            //TODO: need a more accurate check for play_cursor
-            let bytes_to_lock: u32 = match lock_offset > self.play_cursor {
-                true => self.buffer_size - lock_offset + self.play_cursor,
-                _ => self.play_cursor - lock_offset,
-            };
-            if win32::SUCCEEDED(unsafe {
-                buffer.Lock(
-                    lock_offset,
-                    bytes_to_lock,
-                    &mut region1,
-                    &mut region1_size,
-                    &mut region2,
-                    &mut region2_size,
-                    0,
-                )
-            }) {
-                let mut sample_out: *mut i16 = region1.cast();
-                for _ in 0..region1_size.div_euclid(self.bytes_per_sample) {
-                    let value = (self.time.sin() * self.volume as f32) as i16;
-                    unsafe {
-                        sample_out.write(value);
-                        sample_out = sample_out.add(1);
-                        sample_out.write(value);
-                        sample_out = sample_out.add(1);
-                    }
-                    self.running_sample_index += 1;
-                    self.time = 2.0
-                        * std::f32::consts::PI
-                        * (self.running_sample_index as f32
-                            / self.wave_period as f32);
-                }
-
-                sample_out = region2.cast();
-                for _ in 0..region2_size.div_euclid(self.bytes_per_sample) {
-                    let value = (self.time.sin() * self.volume as f32) as i16;
-                    unsafe {
-                        sample_out.write(value);
-                        sample_out = sample_out.add(1);
-                        sample_out.write(value);
-                        sample_out = sample_out.add(1);
-                    }
-                    self.running_sample_index += 1;
-                    self.time = 2.0
-                        * std::f32::consts::PI
-                        * (self.running_sample_index as f32
-                            / self.wave_period as f32);
-                }
-
+            let mut sample_out = region1.cast::<u8>();
+            for i in 0..region1_size {
                 unsafe {
-                    buffer.Unlock(
-                        region1,
-                        region1_size,
-                        region2,
-                        region2_size,
-                    );
+                    sample_out.add(i as usize).write(0);
                 }
             }
+
+            sample_out = region2.cast();
+            for i in 0..region2_size {
+                unsafe {
+                    sample_out.add(i as usize).write(0);
+                }
+            }
+
+            unsafe {
+                buffer.Unlock(region1, region1_size, region2, region2_size);
+            }
+        } else {
+        }
+    }
+    pub fn fill_sound_buffer(
+        &mut self,
+        game_audio: &handmade_hero::GameAudioBuffer,
+        lock_offset: u32,
+        bytes_to_lock: u32,
+    ) {
+        let buffer = unsafe { self.buffer.as_mut().unwrap() };
+
+        let mut region1: win32::LPVOID = core::ptr::null_mut();
+        let mut region1_size = 0u32;
+        let mut region2: win32::LPVOID = core::ptr::null_mut();
+        let mut region2_size = 0u32;
+
+        let mut game_audio_buffer = game_audio.samples;
+        if win32::SUCCEEDED(unsafe {
+            buffer.Lock(
+                lock_offset,
+                bytes_to_lock,
+                &mut region1,
+                &mut region1_size,
+                &mut region2,
+                &mut region2_size,
+                0,
+            )
+        }) {
+            let mut sample_out: *mut i16 = region1.cast();
+            for _ in 0..region1_size.div_euclid(self.bytes_per_sample) {
+                unsafe {
+                    sample_out.write(*game_audio_buffer);
+                    sample_out = sample_out.add(1);
+                    game_audio_buffer = game_audio_buffer.add(1);
+                    sample_out.write(*game_audio_buffer);
+                    sample_out = sample_out.add(1);
+                    game_audio_buffer = game_audio_buffer.add(1);
+                }
+                self.running_sample_index += 1;
+            }
+            sample_out = region2.cast();
+            for _ in 0..region2_size.div_euclid(self.bytes_per_sample) {
+                unsafe {
+                    sample_out.write(*game_audio_buffer);
+                    sample_out = sample_out.add(1);
+                    game_audio_buffer = game_audio_buffer.add(1);
+                    sample_out.write(*game_audio_buffer);
+                    sample_out = sample_out.add(1);
+                    game_audio_buffer = game_audio_buffer.add(1);
+                }
+                self.running_sample_index += 1;
+            }
+
+            unsafe {
+                buffer.Unlock(region1, region1_size, region2, region2_size);
+            }
+        } else {
+            dbg!("Audio  problem:NO LOCK");
+            dbg!(std::io::Error::last_os_error());
+            panic!("At fill_sound_buffer");
         }
     }
 }
