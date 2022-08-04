@@ -16,6 +16,7 @@ Figured out the winapi crate by doing the example given in the
 - Learn conversion from rust `&str` to c type `char` strings
   - Use a vector of u16 to represent wide strings and chain a 0 at the end to
 null terminate.
+  - Return vector as pointer strings are represented as `*u16`
 
 ## Day 2 (Opening a window)
 
@@ -260,4 +261,3 @@ Display performance details:
 output.
 - use Intrinsic `_rdtsc` from `core::arch` a x86 feature that returns a copy of
 the processors time stamp counter;
-
