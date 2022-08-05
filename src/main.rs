@@ -8,9 +8,8 @@ use windows::{
   Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
-      BeginPaint, CreateCompatibleDC, EndPaint, GetDC, ReleaseDC,
-      StretchDIBits, BITMAPINFO, BI_RGB, DIB_RGB_COLORS, HDC, PAINTSTRUCT,
-      SRCCOPY,
+      BeginPaint, EndPaint, GetDC, StretchDIBits, BITMAPINFO, BI_RGB,
+      DIB_RGB_COLORS, HDC, PAINTSTRUCT, SRCCOPY,
     },
     System::{
       LibraryLoader::GetModuleHandleW,
@@ -30,84 +29,134 @@ use windows::{
 
 //Consts and statics
 static mut RUNNING: bool = false;
-static mut BITMAP_INFO: Option<BITMAPINFO> = None;
-// static mut BITMAP_HANDLE: HBITMAP = HBITMAP(0);
-static mut BITMAP_DEVICE_HANDLE: HDC = HDC(0);
-static mut BITMAP_MEMORY: *mut c_void = null_mut();
-static mut BITMAP_WIDTH: i32 = 0;
-static mut BITMAP_HEIGHT: i32 = 0;
 const BYTES_PER_PIXEL: i32 = 4;
 
-fn render_weird_gradient(blue_offset: i32, green_offset: i32) {
-  let (width, height) = unsafe { (BITMAP_WIDTH, BITMAP_HEIGHT) };
-  dbg!((width, height));
-  let pitch = width * BYTES_PER_PIXEL;
-  let mut row: *mut u8 = unsafe { BITMAP_MEMORY.cast() };
-  (0..height).for_each(|y| {
-    let mut pixel: *mut u32 = row.cast();
-    (0..width).for_each(|x| {
-      let blue: u32 = (x + blue_offset) as u32;
-      let green: u32 = (y + green_offset) as u32;
+static mut OFF_SCREEN_BUFFER: OffScreenBuffer = OffScreenBuffer::new();
 
+#[derive(Debug)]
+struct OffScreenBuffer {
+  info: Option<BITMAPINFO>,
+  memory: *mut c_void,
+  width: i32,
+  height: i32,
+  pitch: usize,
+}
+
+impl OffScreenBuffer {
+  const fn new() -> Self {
+    Self {
+      info: None,
+      memory: null_mut(),
+      width: 0,
+      height: 0,
+      pitch: 0,
+    }
+  }
+
+  fn init(&mut self, window_handle: HWND) {
+    let window_dimensions = WindowDimensions::new_for(window_handle);
+    self.height = window_dimensions.height;
+    self.width = window_dimensions.width;
+    self.pitch = (self.width * BYTES_PER_PIXEL) as usize;
+    self.info = Some(BITMAPINFO::default());
+  }
+
+  fn render_weird_gradient(&mut self, blue_offset: i32, green_offset: i32) {
+    let mut row: *mut u8 = self.memory.cast();
+    (0..self.height).for_each(|y| {
+      let mut pixel: *mut u32 = row.cast();
+      (0..self.width).for_each(|x| {
+        let blue: u32 = (x + blue_offset) as u32;
+        let green: u32 = (y + green_offset) as u32;
+        unsafe {
+          *pixel = (green << 8) | blue;
+          pixel = pixel.add(1);
+        }
+      });
       unsafe {
-        *pixel = (green << 8) | blue;
-        pixel = pixel.add(1);
+        row = row.add(self.pitch);
       }
     });
+  }
+
+  fn update(
+    &mut self,
+    device_context: HDC,
+    window_width: i32,
+    window_height: i32,
+  ) {
     unsafe {
-      row = row.add(pitch as usize);
+      StretchDIBits(
+        device_context,
+        0,
+        0,
+        window_width,
+        window_height,
+        0,
+        0,
+        self.width,
+        self.height,
+        self.memory,
+        self.info.as_ref().unwrap(),
+        DIB_RGB_COLORS,
+        SRCCOPY,
+      );
     }
-  });
+  }
+  fn resize_dib_section(&mut self, width: i32, height: i32) {
+    if self.memory != null_mut() {
+      unsafe {
+        let free = VirtualFree(self.memory, 0, MEM_RELEASE);
+        self.memory = null_mut();
+        assert!(free.as_bool());
+      }
+    }
+    self.height = height;
+    self.width = width;
+
+    if let Some(mut bitmap) = self.info {
+      bitmap.bmiHeader.biSize =
+        size_of_val(&bitmap.bmiHeader).try_into().unwrap();
+      bitmap.bmiHeader.biWidth = width;
+      bitmap.bmiHeader.biHeight = height;
+      bitmap.bmiHeader.biPlanes = 1;
+      bitmap.bmiHeader.biBitCount = 32;
+      bitmap.bmiHeader.biCompression = BI_RGB as u32;
+      self.info.replace(bitmap);
+
+      let bitmap_memory_size = width * height * BYTES_PER_PIXEL;
+      unsafe {
+        self.memory = VirtualAlloc(
+          null_mut(),
+          bitmap_memory_size as usize,
+          MEM_COMMIT,
+          PAGE_READWRITE,
+        );
+        assert_ne!(self.memory, null_mut());
+      }
+    }
+    self.pitch = (width * BYTES_PER_PIXEL) as usize;
+  }
 }
 
-pub fn update_window(device_context: HDC, width: i32, height: i32) {
-  unsafe {
-    StretchDIBits(
-      device_context,
-      0,
-      0,
-      BITMAP_WIDTH,
-      BITMAP_HEIGHT,
-      0,
-      0,
-      width,
-      height,
-      BITMAP_MEMORY,
-      BITMAP_INFO.as_ref().unwrap(),
-      DIB_RGB_COLORS,
-      SRCCOPY,
-    );
+struct WindowDimensions {
+  width: i32,
+  height: i32,
+}
+
+impl WindowDimensions {
+  pub fn new_for(window_handle: HWND) -> Self {
+    let mut client_rect = Box::new(RECT::default());
+    unsafe {
+      GetClientRect(window_handle, client_rect.as_mut());
+    }
+    Self {
+      width: client_rect.right - client_rect.left,
+      height: client_rect.bottom - client_rect.top,
+    }
   }
 }
-unsafe fn resize_dib_section(width: i32, height: i32) {
-  if BITMAP_MEMORY != null_mut() {
-    VirtualFree(BITMAP_MEMORY, 0, MEM_RELEASE);
-  }
-  BITMAP_WIDTH = width;
-  BITMAP_HEIGHT = height;
 
-  if BITMAP_DEVICE_HANDLE.is_invalid() {
-    BITMAP_DEVICE_HANDLE = CreateCompatibleDC(HDC::default()).into();
-  }
-  if let Some(mut bitmap) = BITMAP_INFO {
-    bitmap.bmiHeader.biSize =
-      size_of_val(&bitmap.bmiHeader).try_into().unwrap();
-    bitmap.bmiHeader.biWidth = width;
-    bitmap.bmiHeader.biHeight = height;
-    bitmap.bmiHeader.biPlanes = 1;
-    bitmap.bmiHeader.biBitCount = 32;
-    bitmap.bmiHeader.biCompression = BI_RGB as u32;
-    BITMAP_INFO.replace(bitmap);
-
-    let bitmap_memory_size = width * height * BYTES_PER_PIXEL;
-    BITMAP_MEMORY = VirtualAlloc(
-      null_mut(),
-      bitmap_memory_size as usize,
-      MEM_COMMIT,
-      PAGE_READWRITE,
-    )
-  }
-}
 unsafe extern "system" fn window_proc(
   window_handle: HWND,
   msg: u32,
@@ -128,27 +177,21 @@ unsafe extern "system" fn window_proc(
       LRESULT(0)
     }
     WM_SIZE => {
-      let client_rect = Box::leak(Box::new(RECT::default()));
-      GetClientRect(window_handle, client_rect);
-      let width = client_rect.right - client_rect.left;
-      let height = client_rect.bottom - client_rect.top;
-      resize_dib_section(width, height);
+      // let window_dimensions = WindowDimensions::new_for(window_handle);
+      // OFF_SCREEN_BUFFER
+      //   .resize_dib_section(window_dimensions.width, window_dimensions.height);
       LRESULT(0)
     }
     WM_PAINT => {
       let paint = Box::leak(Box::new(PAINTSTRUCT::default()));
       let device_context = BeginPaint(window_handle, paint);
-      // let x = paint.rcPaint.left;
-      // let y = paint.rcPaint.top;
-      // let width = paint.rcPaint.right - x;
-      // let height = paint.rcPaint.bottom - y;
+      let window_dimensions = WindowDimensions::new_for(window_handle);
 
-      let client_rect = Box::leak(Box::new(RECT::default()));
-      GetClientRect(window_handle, client_rect);
-      let width = client_rect.right - client_rect.left;
-      let height = client_rect.bottom - client_rect.top;
-
-      update_window(device_context, width, height);
+      OFF_SCREEN_BUFFER.update(
+        device_context,
+        window_dimensions.width,
+        window_dimensions.height,
+      );
 
       EndPaint(window_handle, paint);
       LRESULT(0)
@@ -158,9 +201,6 @@ unsafe extern "system" fn window_proc(
 }
 
 fn main() {
-  unsafe {
-    BITMAP_INFO.replace(BITMAPINFO::default());
-  }
   // Window Name and Class Name
   let window_class_name = win32_str("ClassName");
   let window_name = win32_str("Window");
@@ -174,13 +214,11 @@ fn main() {
       window_class.lpfnWndProc = Some(window_proc);
       window_class.hInstance = window_instance;
       window_class.lpszClassName = PCWSTR(window_class_name);
-      // dbg!(window_class);
       // Window Class Structure
 
       // Register Window Class
       let class_registered = unsafe { RegisterClassW(window_class) };
       if class_registered != 0 {
-        // dbg!(class_registered);
         // Get Window Handle
         unsafe {
           CreateWindowExW(
@@ -204,19 +242,19 @@ fn main() {
     } else {
       HWND(0)
     };
-  // dbg()
 
   if window_handle != HWND(0) {
     // Messaege Struce
     let message = Box::leak(Box::new(MSG::default()));
-    unsafe {
-      RUNNING = true;
-    }
     let mut x_offset = 0;
     let mut y_offset = 0;
 
     // Message Loop
     unsafe {
+      RUNNING = true;
+      OFF_SCREEN_BUFFER.init(window_handle);
+      OFF_SCREEN_BUFFER.resize_dib_section(1920, 1080);
+      let device_context = GetDC(window_handle);
       while RUNNING {
         while PeekMessageW(message, window_handle, 0, 0, PM_REMOVE).as_bool() {
           if message.message == WM_QUIT {
@@ -225,18 +263,17 @@ fn main() {
           TranslateMessage(message);
           DispatchMessageW(message);
         }
-        render_weird_gradient(x_offset, y_offset);
-        let device_context = GetDC(window_handle);
-        let client_rect = Box::leak(Box::new(RECT::default()));
-
-        GetClientRect(window_handle, client_rect);
-        let width = client_rect.right - client_rect.left;
-        let height = client_rect.bottom - client_rect.top;
-
-        update_window(device_context, width, height);
-        ReleaseDC(window_handle, device_context);
+        OFF_SCREEN_BUFFER.render_weird_gradient(x_offset, y_offset);
+        let window_dimensions = WindowDimensions::new_for(window_handle);
+        // dbg!(&OFF_SCREEN_BUFFER.memory);
+        OFF_SCREEN_BUFFER.update(
+          device_context,
+          window_dimensions.width,
+          window_dimensions.height,
+        );
         y_offset += 1;
-        x_offset += 1;
+        x_offset += 2;
+        // ReleaseDC(window_handle, device_context);
       }
     }
   }
