@@ -126,8 +126,7 @@ changing colours depending on those variables.
 Encapsulate window state in `struct OffScreenBuffer` this holds the memory
 `BITMABITMAPINFO`, width, height, and `bytes_per_pixel`.
 
-The `update_window` and `resize_dib_section` methods are now implemented for this
-`OffScreenBuffer`.
+The `update_window` and `resize_dib_section` methods are now implemented for this `OffScreenBuffer`.
 
 ## Day 6 (Gamepad and keyboard input)
 
