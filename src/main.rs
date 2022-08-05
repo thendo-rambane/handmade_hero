@@ -8,35 +8,68 @@ use windows::{
   Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     Graphics::Gdi::{
-      BeginPaint, CreateCompatibleDC, CreateDIBSection, DeleteObject,
-      EndPaint, StretchDIBits, BITMAPINFO, BI_RGB, DIB_RGB_COLORS, HBITMAP,
-      HDC, PAINTSTRUCT, SRCCOPY,
+      BeginPaint, CreateCompatibleDC, EndPaint, GetDC, ReleaseDC,
+      StretchDIBits, BITMAPINFO, BI_RGB, DIB_RGB_COLORS, HDC, PAINTSTRUCT,
+      SRCCOPY,
     },
-    System::LibraryLoader::GetModuleHandleW,
+    System::{
+      LibraryLoader::GetModuleHandleW,
+      Memory::{
+        VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, PAGE_READWRITE,
+      },
+    },
     UI::WindowsAndMessaging::{
       CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect,
-      GetMessageW, RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-      CW_USEDEFAULT, MSG, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE,
-      WM_DESTROY, WM_PAINT, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW,
-      WS_VISIBLE,
+      PeekMessageW, RegisterClassW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+      CW_USEDEFAULT, MSG, PM_REMOVE, WINDOW_EX_STYLE, WM_ACTIVATEAPP,
+      WM_CLOSE, WM_DESTROY, WM_PAINT, WM_QUIT, WM_SIZE, WNDCLASSW,
+      WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     },
   },
 };
-static mut RUNNING: bool = true;
+
+//Consts and statics
+static mut RUNNING: bool = false;
 static mut BITMAP_INFO: Option<BITMAPINFO> = None;
-static mut BITMAP_HANDLE: HBITMAP = HBITMAP(0);
+// static mut BITMAP_HANDLE: HBITMAP = HBITMAP(0);
 static mut BITMAP_DEVICE_HANDLE: HDC = HDC(0);
 static mut BITMAP_MEMORY: *mut c_void = null_mut();
-pub fn update(device_context: HDC, x: i32, y: i32, width: i32, height: i32) {
+static mut BITMAP_WIDTH: i32 = 0;
+static mut BITMAP_HEIGHT: i32 = 0;
+const BYTES_PER_PIXEL: i32 = 4;
+
+fn render_weird_gradient(blue_offset: i32, green_offset: i32) {
+  let (width, height) = unsafe { (BITMAP_WIDTH, BITMAP_HEIGHT) };
+  dbg!((width, height));
+  let pitch = width * BYTES_PER_PIXEL;
+  let mut row: *mut u8 = unsafe { BITMAP_MEMORY.cast() };
+  (0..height).for_each(|y| {
+    let mut pixel: *mut u32 = row.cast();
+    (0..width).for_each(|x| {
+      let blue: u32 = (x + blue_offset) as u32;
+      let green: u32 = (y + green_offset) as u32;
+
+      unsafe {
+        *pixel = (green << 8) | blue;
+        pixel = pixel.add(1);
+      }
+    });
+    unsafe {
+      row = row.add(pitch as usize);
+    }
+  });
+}
+
+pub fn update_window(device_context: HDC, width: i32, height: i32) {
   unsafe {
     StretchDIBits(
       device_context,
-      x,
-      y,
-      width,
-      height,
-      x,
-      y,
+      0,
+      0,
+      BITMAP_WIDTH,
+      BITMAP_HEIGHT,
+      0,
+      0,
       width,
       height,
       BITMAP_MEMORY,
@@ -47,9 +80,11 @@ pub fn update(device_context: HDC, x: i32, y: i32, width: i32, height: i32) {
   }
 }
 unsafe fn resize_dib_section(width: i32, height: i32) {
-  if !BITMAP_HANDLE.is_invalid() {
-    DeleteObject(BITMAP_HANDLE);
+  if BITMAP_MEMORY != null_mut() {
+    VirtualFree(BITMAP_MEMORY, 0, MEM_RELEASE);
   }
+  BITMAP_WIDTH = width;
+  BITMAP_HEIGHT = height;
 
   if BITMAP_DEVICE_HANDLE.is_invalid() {
     BITMAP_DEVICE_HANDLE = CreateCompatibleDC(HDC::default()).into();
@@ -64,16 +99,13 @@ unsafe fn resize_dib_section(width: i32, height: i32) {
     bitmap.bmiHeader.biCompression = BI_RGB as u32;
     BITMAP_INFO.replace(bitmap);
 
-    if let Ok(bitmap_handle) = CreateDIBSection(
-      BITMAP_DEVICE_HANDLE,
-      &BITMAP_INFO.unwrap(),
-      DIB_RGB_COLORS,
-      &mut BITMAP_MEMORY,
-      None,
-      0,
-    ) {
-      BITMAP_HANDLE = bitmap_handle;
-    }
+    let bitmap_memory_size = width * height * BYTES_PER_PIXEL;
+    BITMAP_MEMORY = VirtualAlloc(
+      null_mut(),
+      bitmap_memory_size as usize,
+      MEM_COMMIT,
+      PAGE_READWRITE,
+    )
   }
 }
 unsafe extern "system" fn window_proc(
@@ -106,11 +138,18 @@ unsafe extern "system" fn window_proc(
     WM_PAINT => {
       let paint = Box::leak(Box::new(PAINTSTRUCT::default()));
       let device_context = BeginPaint(window_handle, paint);
-      let x = paint.rcPaint.left;
-      let y = paint.rcPaint.top;
-      let width = paint.rcPaint.right - x;
-      let height = paint.rcPaint.bottom - y;
-      update(device_context, x, y, width, height);
+      // let x = paint.rcPaint.left;
+      // let y = paint.rcPaint.top;
+      // let width = paint.rcPaint.right - x;
+      // let height = paint.rcPaint.bottom - y;
+
+      let client_rect = Box::leak(Box::new(RECT::default()));
+      GetClientRect(window_handle, client_rect);
+      let width = client_rect.right - client_rect.left;
+      let height = client_rect.bottom - client_rect.top;
+
+      update_window(device_context, width, height);
+
       EndPaint(window_handle, paint);
       LRESULT(0)
     }
@@ -167,19 +206,37 @@ fn main() {
     };
   // dbg()
 
-  if window_handle.0 != 0 {
+  if window_handle != HWND(0) {
     // Messaege Struce
     let message = Box::leak(Box::new(MSG::default()));
+    unsafe {
+      RUNNING = true;
+    }
+    let mut x_offset = 0;
+    let mut y_offset = 0;
 
     // Message Loop
-    'handle_messages: loop {
-      unsafe {
-        if RUNNING && GetMessageW(message, window_handle, 0, 0).as_bool() {
+    unsafe {
+      while RUNNING {
+        while PeekMessageW(message, window_handle, 0, 0, PM_REMOVE).as_bool() {
+          if message.message == WM_QUIT {
+            RUNNING = false;
+          }
           TranslateMessage(message);
           DispatchMessageW(message);
-        } else {
-          break 'handle_messages;
         }
+        render_weird_gradient(x_offset, y_offset);
+        let device_context = GetDC(window_handle);
+        let client_rect = Box::leak(Box::new(RECT::default()));
+
+        GetClientRect(window_handle, client_rect);
+        let width = client_rect.right - client_rect.left;
+        let height = client_rect.bottom - client_rect.top;
+
+        update_window(device_context, width, height);
+        ReleaseDC(window_handle, device_context);
+        y_offset += 1;
+        x_offset += 1;
       }
     }
   }
